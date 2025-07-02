@@ -2,6 +2,7 @@
 #include "../core/SDLManager.h"
 #include "../utils/Log.h"
 #include "../core/Engine.h"
+#include <algorithm>
 
 void* VideoPlayer::lock(void* data, void** p_pixels) {
     VideoPlayer* player = static_cast<VideoPlayer*>(data);
@@ -22,12 +23,26 @@ void VideoPlayer::display(void* data, void* id) {
     (void)id;
 }
 
-VideoPlayer::VideoPlayer() 
+VideoPlayer::VideoPlayer()
     : vlcInstance(nullptr), mediaPlayer(nullptr), media(nullptr), playing(false),
       videoTexture(nullptr), mutex(nullptr), videoWidth(0), videoHeight(0), videoPixels(nullptr) {
+
+    #ifdef _WIN32
+    const char* vlcArgs[] = {
+        "--aout=directsound",
+        "--no-video-title-show",
+        "--quiet"
+    };
+    vlcInstance = libvlc_new(3, vlcArgs);
+    #else
     vlcInstance = libvlc_new(0, nullptr);
+    #endif
+
     if (!vlcInstance) {
         Log::getInstance().error("Failed to initialize VLC instance");
+        if (const char* err = libvlc_errmsg()) {
+            Log::getInstance().error("VLC Error: " + std::string(err));
+        }
         return;
     }
     mutex = SDL_CreateMutex();
@@ -63,14 +78,20 @@ VideoPlayer::~VideoPlayer() {
 
 bool VideoPlayer::loadVideo(const std::string& path) {
     Log::getInstance().info("Attempting to load video: " + path);
-    
-    FILE* file = fopen(path.c_str(), "rb");
+
+    FILE* file = nullptr;
+    #ifdef _WIN32
+    errno_t err = fopen_s(&file, path.c_str(), "rb");
+    if (err != 0 || !file) {
+    #else
+    file = fopen(path.c_str(), "rb");
     if (!file) {
+    #endif
         Log::getInstance().error("Video file not found: " + path);
         return false;
     }
     fclose(file);
-    
+
     if (!vlcInstance) {
         Log::getInstance().error("VLC instance not initialized");
         return false;
@@ -97,9 +118,9 @@ bool VideoPlayer::loadVideo(const std::string& path) {
         }
     }
     libvlc_media_add_option(media, ":network-caching=1000");
-    libvlc_media_add_option(media, ":file-caching=1000");    
+    libvlc_media_add_option(media, ":file-caching=1000");
     libvlc_media_parse_with_options(media, libvlc_media_parse_local, -1);
-    
+
     libvlc_media_parsed_status_t status;
     do {
         status = libvlc_media_get_parsed_status(media);
@@ -113,7 +134,7 @@ bool VideoPlayer::loadVideo(const std::string& path) {
             return false;
         }
     } while (status != libvlc_media_parsed_status_done);
-    
+
     mediaPlayer = libvlc_media_player_new_from_media(media);
     if (!mediaPlayer) {
         Log::getInstance().error("Failed to create media player");
@@ -127,7 +148,7 @@ bool VideoPlayer::loadVideo(const std::string& path) {
 
     libvlc_media_track_t** tracks;
     unsigned tracksCount = libvlc_media_tracks_get(media, &tracks);
-    
+
     bool foundVideo = false;
     for (unsigned i = 0; i < tracksCount; i++) {
         const char* type;
@@ -137,7 +158,7 @@ bool VideoPlayer::loadVideo(const std::string& path) {
             case libvlc_track_text: type = "text"; break;
             default: type = "unknown"; break;
         }
-        
+
         if (tracks[i]->i_type == libvlc_track_video) {
             videoWidth = tracks[i]->video->i_width;
             videoHeight = tracks[i]->video->i_height;
@@ -149,7 +170,7 @@ bool VideoPlayer::loadVideo(const std::string& path) {
     if (tracksCount > 0) {
         libvlc_media_tracks_release(tracks, tracksCount);
     }
-    
+
     libvlc_media_release(media);
     media = nullptr;
 
@@ -170,13 +191,13 @@ bool VideoPlayer::loadVideo(const std::string& path) {
 
     videoPixels = malloc(videoWidth * videoHeight * 4);
     if (!videoPixels) {
-        Log::getInstance().error("Failed to allocate video buffer of size: " + 
+        Log::getInstance().error("Failed to allocate video buffer of size: " +
             std::to_string(videoWidth * videoHeight * 4) + " bytes");
         return false;
     }
 
     SDL_Renderer* renderer = SDLManager::getInstance().getRenderer();
-    videoTexture = SDL_CreateTexture(renderer, 
+    videoTexture = SDL_CreateTexture(renderer,
                                    SDL_PIXELFORMAT_RGB888,
                                    SDL_TEXTUREACCESS_STREAMING,
                                    videoWidth, videoHeight);
@@ -219,7 +240,7 @@ void VideoPlayer::stop() {
 
 void VideoPlayer::setVolume(int volume) {
     if (mediaPlayer) {
-        volume = std::max(0, std::min(100, volume));
+        volume = (std::min)((std::max)(0, volume), 100);
         libvlc_audio_set_volume(mediaPlayer, volume);
     } else {
         Log::getInstance().error("Cannot set volume: no media loaded");
@@ -228,7 +249,7 @@ void VideoPlayer::setVolume(int volume) {
 
 void VideoPlayer::setPosition(float pos) {
     if (mediaPlayer) {
-        pos = std::max(0.0f, std::min(1.0f, pos));
+        pos = (std::min)((std::max)(0.0f, pos), 1.0f);
         libvlc_media_player_set_position(mediaPlayer, pos);
     } else {
         Log::getInstance().error("Cannot set position: no media loaded");
@@ -252,7 +273,7 @@ bool VideoPlayer::isPlaying() const {
 void VideoPlayer::update() {}
 
 void VideoPlayer::render(SDL_Renderer* renderer) {
-    if (!videoTexture || !playing) return;
+    if (!videoTexture) return;
 
     SDL_LockMutex(mutex);
     SDL_UpdateTexture(videoTexture, nullptr, videoPixels, videoWidth * 4);
@@ -261,10 +282,10 @@ void VideoPlayer::render(SDL_Renderer* renderer) {
     SDL_Rect dstRect;
     int windowWidth, windowHeight;
     SDL_GetRendererOutputSize(renderer, &windowWidth, &windowHeight);
-    
+
     float videoAspect = (float)videoWidth / videoHeight;
     float windowAspect = (float)windowWidth / windowHeight;
-    
+
     if (windowAspect > videoAspect) {
         dstRect.h = windowHeight;
         dstRect.w = (int)(windowHeight * videoAspect);
